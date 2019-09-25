@@ -8,119 +8,131 @@ mutable struct pArrHdls
     pErr::Array{Float64,1}
     mini::Array{Float64,1}
     maxi::Array{Float64,1}
+    restmp::Array{Float64,1}
 end
 
-
-
-function minDistGauss!(restmp::Array{Float64, 1},
-                       bd::BallTreeDensity,
-                       dRoot::Int,
-                       atTree::BallTreeDensity,
-                       aRoot::Int,
-                       addop=(+,),
-                       diffop=(-,)  )::Nothing
-  #atCenter = center(atTree, aRoot)
-  #densCenter = center(bd, dRoot)
-  #bw = bwMax(bd, dRoot)
-  # dRoot != 1 && error("dRoot=$dRoot, aRoot=$aRoot")
-
+# reduced min and max dist functions in v0.5.0+
+function distGauss!(restmp::Array{Float64, 1},
+                    bd::BallTreeDensity,
+                    dRoot::Int,
+                    atTree::BallTreeDensity,
+                    aRoot::Int,
+                    minmaxFnc::Function,
+                    minmaxFncUni::Function,
+                    mainop=(-,),
+                    diffop=(-,),
+                    saturate::Bool=false  )::Nothing
+  #
   @fastmath @inbounds begin
     restmp[1] = 0.0
     #tmp = 0.0
     for k=1:Ndim(atTree.bt)
       ## TODO upgrade for more general manifolds
       restmp[2] = abs( diffop[k]( center(atTree.bt, aRoot, k), center(bd.bt, dRoot, k)) )
-      restmp[2] = diffop[k](restmp[2], rangeB(atTree.bt, aRoot, k) )
-      restmp[2] = diffop[k](restmp[2], rangeB(bd.bt, dRoot, k) )
-      restmp[2] = (restmp[2] > 0) ? restmp[2] : 0.0
-      if ( bwUniform(bd) )
-        restmp[1] -= (restmp[2]*restmp[2])/bwMax(bd, dRoot, k)
-      else
-        restmp[1] -= (restmp[2]*restmp[2])/bwMax(bd, dRoot, k) + log(bwMin(bd, dRoot, k))
+      restmp[2] = mainop[k](restmp[2], rangeB(atTree.bt, aRoot, k) )
+      restmp[2] = mainop[k](restmp[2], rangeB(bd.bt, dRoot, k) )
+      # reasoning behind saturation for minDistGauss not clear (or well documented yet)
+      restmp[2] = (saturate && (restmp[2] <= 0)) ? 0.0 : restmp[2]
+      restmp[1] += (restmp[2]*restmp[2])/minmaxFnc(bd, dRoot, k)
+      if  !bwUniform(bd)
+        restmp[1] += log(minmaxFncUni(bd, dRoot, k))
       end
     end
-    restmp[1] = exp(0.5*restmp[1])
+    restmp[1] = exp(-0.5*restmp[1])
   end
   nothing
 end
 
-function maxDistGauss!(rettmp::Vector{Float64},
-                       bd::BallTreeDensity,
-                       dRoot::Int,
-                       atTree::BallTreeDensity,
-                       aRoot::Int,
-                       addop=(+,),
-                       diffop=(-,)  )::Nothing
-  #atCenter = center(atTree, aRoot)
-  #densCenter = center(bd, dRoot)
-  #bw = bwMin(bd, dRoot)
 
-  rettmp[1] = 0.0
-  @fastmath @inbounds begin for k in 1:Ndim(atTree.bt)
-      # TODO upgrade for more general manifolds
-      rettmp[2] = abs( diffop[k](center(atTree.bt, aRoot, k), center(bd.bt, dRoot, k)) )
-      rettmp[2] = addop[k](rettmp[2], rangeB(atTree.bt, aRoot,k) )
-      rettmp[2] = addop[k](rettmp[2], rangeB(bd.bt, dRoot, k) )
-      if ( bwUniform(bd) )
-          rettmp[1] -= (rettmp[2]*rettmp[2])/bwMin(bd, dRoot, k)
-      else
-          # TODO - Root not defined here
-          rettmp[1] -= (rettmp[2]*rettmp[2])/(bwMin(bd, dRoot, k)) + (log(bwMax(bd.bt, dRoot, k)))
-      end
-    end
-  end
-  rettmp[1] = exp(rettmp[1]/2.0)
-  nothing
-end
+maxDistGauss!(rettmp::Vector{Float64},
+               bd::BallTreeDensity,
+               dRoot::Int,
+               atTree::BallTreeDensity,
+               aRoot::Int,
+               addop=(+,),
+               diffop=(-,) )::Nothing = distGauss!(rettmp,bd,dRoot,atTree,aRoot,bwMin,bwMax,addop,diffop)
+#
+
+
+minDistGauss!(restmp::Array{Float64, 1},
+               bd::BallTreeDensity,
+               dRoot::Int,
+               atTree::BallTreeDensity,
+               aRoot::Int,
+               addop=(+,),
+               diffop=(-,) )::Nothing = distGauss!(restmp,bd,dRoot,atTree,aRoot,bwMax,bwMin,diffop,diffop,true)
+#
 
 #   Bounds on kernel values between points in this subtree & another
-function maxDistKer!(rettmp, bd::BallTreeDensity,
-                     dRoot::Int,
-                     atTree::BallTreeDensity,
-                     aRoot::Int,
-                     addop=(+,),
-                     diffop=(-,) )
-  maxDistGauss!(rettmp, bd, dRoot, atTree, aRoot, addop, diffop)
+maxDistKer!(rettmp,
+            bd::BallTreeDensity,
+            dRoot::Int,
+            atTree::BallTreeDensity,
+            aRoot::Int,
+            addop=(+,),
+            diffop=(-,) ) = maxDistGauss!(rettmp, bd, dRoot, atTree, aRoot, addop, diffop)
+#
+
+minDistKer!(rettmp,
+            bd::BallTreeDensity,
+            dRoot::Int,
+            atTree::BallTreeDensity,
+            aRoot::Int,
+            addop=(+,),
+            diffop=(-,) ) = minDistGauss!(rettmp, bd, dRoot, atTree, aRoot, addop, diffop)
+#
+
+
+function evaluateAllKernels!(bd::BallTreeDensity,
+                             dRoot::Int,
+                             atTree::BallTreeDensity,
+                             aRoot::Int,
+                             hdl::pArrHdls,
+                             j::Int,
+                             minVal::Vector{Float64},
+                             maxVal::Vector{Float64},
+                             addop=(+,),
+                             diffop=(-,)  )::Nothing
+  #
+  for i in leafFirst(bd.bt,dRoot):leafLast(bd.bt, dRoot)
+    # TODO PoC sensitivity weighting here
+    if (bd != atTree || i != j)                                    #  Check leave-one-out condition;
+      #d = weight(bd.bt, i) * maxDistKer(bd, i, atTree, j)         #  Do direct N^2 kernel evaluation
+      maxDistKer!(hdl.restmp, bd, i, atTree, j, addop, diffop)
+      # d = bd.bt.weights[i] * hdl.restmp[1]                       #  Do direct N^2 kernel evaluation
+      hdl.restmp[1] *= bd.bt.weights[i]                            #  Do direct N^2 kernel evaluation
+      @inbounds hdl.pMin[j] += hdl.restmp[1] # hdl.pMin[j] + d
+      @inbounds hdl.pMax[j] += hdl.restmp[1] # hdl.pMax[j] + d
+    end
+  end
+
+  @inbounds if (hdl.pMin[j] < minVal[1]) minVal[1] = hdl.pMin[j]; end  # determine min & max value in this block
+  @inbounds if (hdl.pMax[j] > maxVal[1]) maxVal[1] = hdl.pMax[j]; end
   nothing
 end
 
-function minDistKer!(rettmp,
-                     bd::BallTreeDensity,
-                     dRoot::Int,
-                     atTree::BallTreeDensity,
-                     aRoot::Int,
-                     addop=(+,),
-                     diffop=(-,)  )
-  minDistGauss!(rettmp, bd, dRoot, atTree, aRoot, addop, diffop)
+function evalDirect(bd::BallTreeDensity,
+                    dRoot::Int,
+                    atTree::BallTreeDensity,
+                    aRoot::Int,
+                    hdl::pArrHdls,
+                    addop=(+,),
+                    diffop=(-,),
+                    gradP::Vector{Float64}=Float64[]  )
+  #
+  # firstFlag = true;
+  minVal=Float64[2e22;]
+  maxVal=Float64[0.0;]
+  # restmp = Array{Float64,1}(undef, 2)
+  # d = 0.0
+  for j in leafFirst(atTree.bt, aRoot):leafLast(atTree.bt, aRoot)
+    evaluateAllKernels!( bd,dRoot,atTree,aRoot,hdl,j,minVal,maxVal,addop,diffop )
+  end
+  @inbounds hdl.pMin[aRoot] = minVal[1]
+  @inbounds hdl.pMax[aRoot] = maxVal[1]
   nothing
 end
 
-function pushDownLocal(atTree::BallTreeDensity, aRoot::Int, hdl::pArrHdls)
-    if !(isLeaf(atTree, aRoot))
-      close = atTree.left(aRoot);
-      if (close != NO_CHILD)
-        hdl.pAdd[1,close] += hdl.pAdd[1,aRoot]
-      end
-      close = right(atTree, aRoot);
-      if (close != NO_CHILD)
-        hdl.pAdd[1,close] += hdl.pAdd[1,aRoot]
-      end
-      hdl.pAdd[1,aRoot] = 0
-    end
-end
-
-function pushDownAll(locations::BallTreeDensity, hdl::pArrHdls)
-  for j in root():(leafFirst(locations,root())-1)
-      hdl.pAdd[1,  left(locations, j)] += hdl.pAdd[1,j]
-      hdl.pAdd[1, right(locations, j)] += hdl.pAdd[1,j]
-      hdl.pAdd[1,j] = 0
-    end
-    for j in leafFirst(locations, root()):(leafLast(locations, root())+1)
-      hdl.pMin[j] += hdl.pAdd[1,j] - hdl.pErr[j]
-      hdl.pMax[j] += hdl.pAdd[1,j] + hdl.pErr[j]
-      hdl.pAdd[1,j] = 0; hdl.pErr[j] = 0;
-    end
-end
 
 function recurseMinMax(atTree::BallTreeDensity, aRoot::Int, hdl::pArrHdls)
   l = left(atTree, aRoot); r = right(atTree, aRoot);
@@ -131,37 +143,6 @@ function recurseMinMax(atTree::BallTreeDensity, aRoot::Int, hdl::pArrHdls)
   if (hdl.pMax[aRoot] < hdl.pMax[r]) hdl.pMax[aRoot] = hdl.pMax[r] end
 end
 
-function evalDirect(bd::BallTreeDensity,
-                    dRoot::Int,
-                    atTree::BallTreeDensity,
-                    aRoot::Int,
-                    hdl::pArrHdls,
-                    addop=(+,),
-                    diffop=(-,)  )
-  #
-  firstFlag = true;
-  minVal=2e22;
-  maxVal=0.0;
-  restmp = Array{Float64,1}(undef, 2)
-  d = 0.0
-  for j in leafFirst(atTree.bt, aRoot):leafLast(atTree.bt, aRoot)
-    for i in leafFirst(bd.bt,dRoot):leafLast(bd.bt, dRoot)
-      if (bd != atTree || i != j)                              # Check leave-one-out condition;
-        #d = weight(bd.bt, i) * maxDistKer(bd, i, atTree, j)   #  Do direct N^2 kernel evaluation
-        maxDistKer!(restmp, bd, i, atTree, j, addop, diffop)
-        d = bd.bt.weights[i] * restmp[1]                       #  Do direct N^2 kernel evaluation
-        hdl.pMin[j] = hdl.pMin[j] + d
-        hdl.pMax[j] = hdl.pMax[j] + d
-      end
-    end
-
-    @inbounds if (hdl.pMin[j] < minVal) minVal = hdl.pMin[j]; end  # determine min & max value in this block
-    @inbounds if (hdl.pMax[j] > maxVal) maxVal = hdl.pMax[j]; end
-  end
-  @inbounds hdl.pMin[aRoot] = minVal
-  @inbounds hdl.pMax[aRoot] = maxVal
-  nothing
-end
 
 function recurseOnSubtrees(bd::BallTreeDensity,
                            dRoot::Int,
@@ -254,7 +235,8 @@ function evaluate(bd::BallTreeDensity,
                   maxErr::Float64,
                   hdl::pArrHdls,
                   addop=(+,),
-                  diffop=(-,)  )
+                  diffop=(-,),
+                  gradP::Vector{Float64}=Float64[]  )
   #
   global DirectSize
   global FORCE_EVAL_DIRECT
@@ -266,7 +248,7 @@ function evaluate(bd::BallTreeDensity,
 
   # TODO Nixies Issue -- proper way to compute on-manifold distances between balls
   if !FORCE_EVAL_DIRECT
-    restmp = Array{Float64,1}(undef, 2)
+    restmp = hdl.restmp # Array{Float64,1}(undef, 2)
 
     # find the minimum and maximum effect of these two balls on each other
     minDistKer!(restmp, bd, dRoot, atTree, aRoot, addopT, diffopT)
@@ -288,13 +270,13 @@ function evaluate(bd::BallTreeDensity,
     else
       # TODO this if statement call consumes a lot of memory for some reason
       if (Npts(bd, dRoot)*Npts(atTree, aRoot)<=DirectSize)  # DIRECT EVALUATION
-        evalDirect(bd, dRoot, atTree, aRoot, hdl, addopT, diffopT)
+        evalDirect(bd, dRoot, atTree, aRoot, hdl, addopT, diffopT, gradP)
       else
         recurseOnSubtrees(bd, dRoot, atTree, aRoot, maxErr, hdl, addopT, diffopT)
       end
     end
   else
-    evalDirect(bd, dRoot, atTree, aRoot, hdl, addopT, diffopT)
+    evalDirect(bd, dRoot, atTree, aRoot, hdl, addopT, diffopT, gradP)
   end
 
   return nothing
@@ -307,7 +289,8 @@ function evaluate(bd::BallTreeDensity,
                   p::Array{Float64,1},
                   maxErr::Float64,
                   addop=(+,),
-                  diffop=(-,) )
+                  diffop=(-,),
+                  gradP::Vector{Float64}=Float64[] )
   #
   if bd.bt.dims != locations.bt.dims
     error("evaluate -- dimensions of two BallTreeDensities must match")
@@ -318,15 +301,16 @@ function evaluate(bd::BallTreeDensity,
                  zeros(2*locations.bt.num_points),
                  zeros(1,0), #zeros(1,2*locations.bt.dims),
                  zeros(0),   #zeros(2*locations.bt.num_points),
-                 [0.], [0.])
+                 [0.], [0.],
+                 zeros(2))
   #
-  evaluate(bd, root(), locations, root(), 2.0*maxErr, hdl, addop, diffop)
+  evaluate(bd, root(), locations, root(), 2.0*maxErr, hdl, addop, diffop, gradP)
 
   # Gaussian kernel (add other kernel types here)
   norm = (2.0*pi)^((bd.bt.dims)/2.0)
   if (bwUniform(bd))
     @inbounds @fastmath @simd for i in 1:bd.bt.dims
-        norm *= sqrt(bd.bandwidthMax[i])
+      norm *= sqrt(bd.bandwidthMax[i])
     end
   end
 
@@ -353,9 +337,21 @@ function makeDualTree(bd1::BallTreeDensity,
                       addop=(+,),
                       diffop=(-,) )
     #
+    # TODO should have in place memory option
     pRes = zeros(Npts(bd2))
+    # add gradient eval memory per kernel location here too
+    dpRes = zeros(Npts(bd2))
     # NOTE should be evaluate!
-    evaluate(bd1, bd2, pRes, errTol, addop, diffop)
+    evaluate(bd1, bd2, pRes, errTol, addop, diffop, dpRes)
+    return pRes
+end
+
+function makeDualTree(bd::BallTreeDensity, errTol::Float64, addop=(+,), diffop=(-,))
+    #densTree = bd ## just a new pointer to the same data...
+    pRes = zeros(Npts(bd))
+    #println("makeDualTree -- leave one out, going to call evaluate(densTree")
+    evaluate(bd, bd, pRes, errTol, addop, diffop) # this seems excessive
+
     return pRes
 end
 
@@ -369,7 +365,6 @@ function evaluateDualTree(bd::BallTreeDensity,
     ndims = bd.bt.dims
     addopT = length(addop)!=ndims ? ([ (addop[1]) for i in 1:ndims]...,) : addop
     diffopT = length(diffop)!=ndims ? ([ (diffop[1]) for i in 1:ndims]...,) : diffop
-
 
     if (bd.bt.dims != size(pos,1)) error("bd and pos must have the same dimension") end
     if (lvFlag)
@@ -395,15 +390,6 @@ function evaluateDualTree(bd::BallTreeDensity,
     return evaluateDualTree(bd, pos2, lvFlag, errTol, addop, diffop)
 end
 
-function makeDualTree(bd::BallTreeDensity, errTol::Float64, addop=(+,), diffop=(-,))
-    #densTree = bd ## just a new pointer to the same data...
-    pRes = zeros(Npts(bd))
-    #println("makeDualTree -- leave one out, going to call evaluate(densTree")
-    evaluate(bd, bd, pRes, errTol, addop, diffop) # this seems excessive
-
-    return pRes
-end
-
 function evaluateDualTree(bd::BallTreeDensity,
                           pos::BallTreeDensity,
                           lvFlag::Bool=false,
@@ -420,45 +406,73 @@ function evaluateDualTree(bd::BallTreeDensity,
     return p
 end
 
+# using DelimitedFiles, Dates
 
-"""
-    $SIGNATURES
 
-Evaluate the KDE object at given points.
+# export setOverride
+# global override = 0.03
+#
+# function setOverride(x::Float64)
+#   global override = x
+#   override
+# end
 
-> **Note**, must use Array{Float64,2} when passing in evaluation points.
-"""
-function (bd::BallTreeDensity)(pos::Array{Float64,2},
-                               lvFlag::Bool=false,
-                               errTol::Float64=1e-3,
-                               addop=(+,),
-                               diffop=(-,) )
-  evaluateDualTree(bd, pos, lvFlag, errTol, addop, diffop)
+global cutoffOverride = false
+function setCutoffOverride(x::Bool)
+  global cutoffOverride = x
+  cutoffOverride
 end
-function (bd::BallTreeDensity)(pos::Array{Float64,1},
-                               lvFlag::Bool=false,
-                               errTol::Float64=1e-3,
-                               addop=(+,),
-                               diffop=(-,) )
-  # TODO should it not be reshape(pos,1,:) instead?
-  # @warn "whoa! check reshape inside this eval balltree function"
-  evaluateDualTree(bd, reshape(pos,1,:), lvFlag, errTol, addop, diffop)
-end
-
-
 
 function evalAvgLogL(bd1::BallTreeDensity,
                      bd2::BallTreeDensity,
                      addop=(+,),
-                     diffop=(-,) )
+                     diffop=(-,),
+                     maskGrad::Bool=(bd1==bd2),
+                     cutoffscale::Float64=0.02  )
   #
-  L = evaluateDualTree(bd1, bd2, false, 1e-3, addop, diffop) # true
+  global cutoffOverride
+  maskGrad &= cutoffOverride
+
+  L = evaluateDualTree(bd1, bd2, false, 1e-3, addop, diffop)
+  #
+  len = length(L)
+  mask = fill!(BitArray{1}(undef, len), true)
+  mdL = 0.0
+  dL = zeros(len)
+  keepratio = 1.0
+  if maskGrad
+    bw = bd1.bandwidth
+    epsi = 1.0e-5
+    updateBandwidth!(bd1, bw.+epsi)
+    Lepsi = evaluateDualTree(bd1, bd2, false, 1e-3, addop, diffop)
+    updateBandwidth!(bd1, bw)
+    dL .= abs.(Lepsi-L) # ./epsi
+    mdL = Statistics.mean(dL) # not sure if we can assume Array{Float64, 1} here
+    mask .= (cutoffscale.*mdL) .< dL
+    # writedlm("/tmp/dev/dL_$(now()).txt", dL, ',')
+    keepratio = len/sum(mask)
+        # i =
+    if 1.0/keepratio < 0.85
+          #&& i < 10
+          # i += 1
+          # mask .= (0.1*i*cutoffscale.*mdL) .< dL
+      fill!(mask, true)
+      keepratio = len/sum(mask)
+      # if i == 1
+        @warn "evalAvgLogL blocking to keep more than 85% of kernels during self evaluation."
+      # end
+    end
+
+    # compensate L with mask
+    L[xor.(mask,true)] .= 1.0
+  end
+
   #printBallTree(bd1)
   W = getWeights(bd2)
 
   # TODO convert ind to a for loop to avoid memory allocation
   ind = findall(L.==0.0)
-  ll = nothing
+  ll = 0.0
   if sum(findall(x->x!=0, W[ind])) > 0
     # println("evalAvgLogL -- in if")
     ll=-Inf
@@ -467,6 +481,12 @@ function evalAvgLogL(bd1::BallTreeDensity,
     L[ind] .= 1.0
     ll = (log.(L)')*W
   end
+
+  # check, and do, if compensation is required
+  if maskGrad
+    ll *= keepratio
+  end
+
   return ll
 end
 
@@ -508,6 +528,30 @@ function entropy(bd::BallTreeDensity, addop=(+,), diffop=(-,))
     return H[1]
 end
 
+
+"""
+    $SIGNATURES
+
+Evaluate the KDE object at given points.
+
+> **Note**, must use Array{Float64,2} when passing in evaluation points.
+"""
+function (bd::BallTreeDensity)(pos::Array{Float64,2},
+                               lvFlag::Bool=false,
+                               errTol::Float64=1e-3,
+                               addop=(+,),
+                               diffop=(-,) )
+  evaluateDualTree(bd, pos, lvFlag, errTol, addop, diffop)
+end
+function (bd::BallTreeDensity)(pos::Array{Float64,1},
+                               lvFlag::Bool=false,
+                               errTol::Float64=1e-3,
+                               addop=(+,),
+                               diffop=(-,) )
+  # TODO should it not be reshape(pos,1,:) instead?
+  # @warn "whoa! check reshape inside this eval balltree function"
+  evaluateDualTree(bd, reshape(pos,1,:), lvFlag, errTol, addop, diffop)
+end
 
 
 function getKDERange(bd::BallTreeDensity; extend::Float64=0.1, addop=(+,), diffop=(-,) )
